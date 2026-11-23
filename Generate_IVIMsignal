@@ -1,0 +1,131 @@
+import numpy as np
+import pandas as pd
+from datetime import datetime
+from src.standardized.TF_reference_IVIMfit import TF_reference_IVIMfit
+from src.wrappers.OsipiBase import OsipiBase
+
+# -----------------------------
+# IVIM model
+# -----------------------------
+def ivim(bvalues, Dt, Fp, Dp, S0=1):
+    return S0 * (Fp * np.exp(-bvalues * Dp) + (1 - Fp) * np.exp(-bvalues * Dt))
+
+
+# -----------------------------
+# Noise simulation (vectorized)
+# -----------------------------
+def add_rician_noise(clean_signal, SNRs, sims, rng):
+    signal = np.tile(clean_signal, (sims, 1))
+
+    std_dev = clean_signal / SNRs
+
+    noise_real = rng.normal(0, std_dev, size=(sims, len(clean_signal)))
+    noise_imag = rng.normal(0, std_dev, size=(sims, len(clean_signal)))
+
+    noisy_signal = signal + noise_real
+    rician_signal = np.sqrt(noisy_signal**2 + noise_imag**2)
+
+    return rician_signal
+
+
+# -----------------------------
+# Fitting
+# -----------------------------
+def fit_TF_reference(simulated_signals, bvalues):
+    ivim_algo = TF_reference_IVIMfit(thresholds=150)
+    maps = OsipiBase.osipi_fit(ivim_algo, simulated_signals, bvalues)
+
+    return maps["D"], maps["f"], maps["Dp"]
+
+
+# -----------------------------
+# Parameters
+# -----------------------------
+D_array = np.array([0.0003, 0.0004, 0.0005, 0.0007, 0.0009, 0.0011, 0.0013, 0.0015, 0.0021, 0.0027, 0.003])
+f_array = np.array([0.01, 0.05, 0.10, 0.15, 0.2, 0.3, 0.4, 0.55, 0.7])
+Dp_array = np.array([0.005, 0.015, 0.025, 0.035, 0.045, 0.065, 0.085, 0.1])
+
+bvalues = np.array([0, 1, 5, 10, 15, 25, 50, 75, 100, 150, 200, 250, 300, 350, 400, 500])
+repeats_start = np.array([12]*len(bvalues))
+
+sims = 1000
+SNR_b0 = 45
+
+# -----------------------------
+# Start
+# -----------------------------
+start_time = datetime.now()
+print(f"Script started at: {start_time}")
+
+rng = np.random.RandomState(42)
+
+global_idx = 0
+
+for repeat_reduction in range(0, 12):
+
+    nr_averages = repeats_start - repeat_reduction
+
+    # Compute SNR per b-value
+    SNRs = SNR_b0 * np.exp(-bvalues / 1000) * np.sqrt(nr_averages)  # enforce b0
+    SNRs[0] = SNRs[0]/np.sqrt(3)
+    results = []
+
+    print(f"Running repeat level: {nr_averages[1]}")
+
+    for D in D_array:
+        for f in f_array:
+            for Dp in Dp_array:
+
+                # -----------------------------
+                # 1. Clean signal (once)
+                # -----------------------------
+                clean_signal = ivim(bvalues, D, f, Dp, 1)
+
+                # -----------------------------
+                # 2. Add noise (vectorized)
+                # -----------------------------
+                rician_signal = add_rician_noise(clean_signal, SNRs, sims, rng)
+
+                # -----------------------------
+                # 3. Fit
+                # -----------------------------
+                D_calc, f_calc, Dp_calc = fit_TF_reference(rician_signal, bvalues)
+
+                # -----------------------------
+                # 4. Store results
+                # -----------------------------
+                for i in range(sims):
+                    results.append([
+                        global_idx,
+                        D, f, Dp,
+                        D_calc[i],
+                        f_calc[i],
+                        Dp_calc[i]
+                    ])
+                    global_idx += 1
+
+    # -----------------------------
+    # Save results
+    # -----------------------------
+    df = pd.DataFrame(results, columns=[
+        'Simulation',
+        'D_true',
+        'f_true',
+        'Dp_true',
+        'D_fit',
+        'f_fit',
+        'Dp_fit'
+    ])
+
+    output_path = "" #To be specified manually
+
+    df.to_csv(output_path, index=False)
+
+    print(f"Saved: {output_path}")
+
+# -----------------------------
+# End
+# -----------------------------
+end_time = datetime.now()
+print(f"Script ended at: {end_time}")
+print(f"Duration: {end_time - start_time}")
